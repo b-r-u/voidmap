@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html>
+    <head>
+      <meta charset="utf-8"/>
+      <link rel="stylesheet" href="leaflet/leaflet.css" />
+      <script src="leaflet/leaflet.js"></script>
+      <script src="mojis/twemoji.min.js"></script>
+      <title>voidmap</title>
+      <style type="text/css">
+        body {
+          font-family: Arial;
+          margin: 0;
+          padding: 0;
+        }
+        #map {
+          position: absolute;
+          width: 100%;
+          height: 100%;
+          margin: 0;
+        }
+        #user-controls {
+          top: 10rem;
+          position: absolute;
+          display: block;
+          background-color: white;
+          z-index: 2000;
+          padding: 1rem;
+          border: 2px solid #c8c8c6;
+          border-radius: 3px;
+          margin-left: 10px;
+        }
+        .emoji {
+          width: 3rem;
+          height: 3rem;
+        }
+        #emoji-selector {
+          display: grid;
+          grid-template-columns: 2rem 2rem 2rem 2rem 2rem;
+          display: none;
+          background-color: white;
+          z-index: 1200;
+          padding: 1rem;
+          box-shadow: 0 0 10px rgba(0, 0, 0, 0.25);
+        }
+        #emoji-selector div {
+          width: 2rem;
+          height: 2rem;
+          display: block;
+          text-align: center;
+          font-size: 2rem;
+        }
+        #emoji-selector div:hover {
+          background-color: black;
+        }
+        #user-emoji-button {
+          width: 4rem;
+          height: 4rem;
+          padding: 0;
+        }
+        .emoji-marker-icon {
+          width: 2rem;
+          height: 2rem;
+          top: -1.0rem;
+          left: -1.0rem;
+          padding: 0;
+        }
+        .shout-bubble {
+          color: white;
+          background-color: rgba(0, 0, 0, 0.75);
+          padding: 0.3rem 1rem;
+          display: block;
+          min-width: 7rem;
+          text-align: center;
+          margin-top: 0.5rem;
+          font-family: monospace;
+          font-weight: bold;
+          word-break: break-word;
+        }
+        .fade-out {
+          opacity: 0;
+          transition: opacity 1s linear;
+        }
+      </style>
+    </head>
+    <body>
+      <div id="user-controls">
+        <button id="user-emoji-button" type="button">...</button>
+        <div id="selector-anchor" style="position: relative;">
+          <div id="emoji-selector" style="position: absolute;"></div>
+        </div><br>
+        <label>Name:<br>
+          <input id="user-name-input" type="text"><br>
+        <label>
+        <input id="shout-input" placeholder="say something..." type="text"><br>
+        <button id="refresh-button">↻</button>
+      </div>
+    <div id="map" class="full"></div>
+      <script>
+        let EMOJIS = ["🌞", "🍓", "🍒", "🍑", "🍐", "🍏", "🍎", "🍍", "🍌", "🍋", "🍊", "🍉", "🍇", "🍆", "🍄", "🌜", "🌛", "🌟", "🌠", "🌺", "🌻", "🌼", "🌽", "🌷", "😃", "😀", "😁", "😂", "😅", "😆", "😇", "😉", "😊", "😋", "😌", "😍", "😎", "😏", "😗", "😘", "😙", "😚", "😛", "😜", "😝", "😬", "🙋", "🐙", "🐴"];
+        twemoji.base = "mojis/";
+
+        let mojify = function(element, className="emoji") {
+          twemoji.parse(element,   {
+            ext: ".svg",
+            className: className,
+            folder: "svg",
+          });
+        }
+
+        var lmap = L.map('map', {"keyboard": false})
+          .setView([52.398754, 13.043861], 11);
+
+        const light_layer = L.tileLayer('https://cartodb-basemaps-{s}.global.ssl.fastly.net/light_all/{z}/{x}/{y}.png', {
+            attribution: 'Tiles &copy; Carto, under CC BY 3.0. Data by OpenStreetMap, under ODbL.',
+            maxZoom: 19
+        }).addTo(lmap);
+
+        var websocket = new WebSocket("ws://127.0.0.1:2010/");
+        var speech = window.speechSynthesis;
+
+        let send = function (obj) {
+          console.log("SEND:");
+          console.log(obj);
+          websocket.send(JSON.stringify(obj));
+        }
+
+        {
+          let but = document.getElementById("user-emoji-button");
+          let sel = document.getElementById("emoji-selector");
+          for (let i = 0; i < EMOJIS.length; i++) {
+            let div = document.createElement("div");
+            div.textContent = EMOJIS[i];
+            div.onclick = function (event) {
+              send({ action: 'user_update', 'emoji': EMOJIS[i] })
+              sel.style.display = "none";
+            };
+            mojify(div, "selector-emoji");
+            sel.appendChild(div);
+          }
+          but.onclick = function (event) {
+            if (sel.style.display == "grid") {
+              sel.style.display = "none";
+            } else {
+              sel.style.display = "grid";
+            }
+          };
+        }
+
+        document.addEventListener("keydown", function (event) {
+          if (event.key === "Escape" || event.key === "Esc") {
+            let sel = document.getElementById("emoji-selector");
+            sel.style.display = "none";
+          }
+        });
+
+        {
+          let usernameinput = document.getElementById("user-name-input");
+          usernameinput.onchange = function (event) {
+            send({action: 'user_update', 'name': usernameinput.value});
+          };
+        }
+
+        {
+          document.getElementById("refresh-button").onclick = function (event) {
+            send({action: 'refresh'});
+          };
+        }
+
+        {
+          let shout = document.getElementById("shout-input");
+          shout.onchange = function (event) {
+            send({action: 'shout', 'text': shout.value});
+            shout.value = "";
+          };
+        }
+
+        var myself = {};
+        var users = {};
+
+        let update_self = function (obj) {
+          myself.id = obj.id;
+        };
+
+        let update_user = function (obj) {
+          let id = obj.id;
+          if (!users[id]) {
+            users[id] = {};
+          }
+          Object.assign(users[id], obj);
+          delete users[id].id;
+          delete users[id].action;
+        };
+
+        let render_user = function (id) {
+          let user = users[id];
+          if (id == myself.id) {
+            // myself
+            document.getElementById("user-name-input").value = user.name;
+            let but = document.getElementById("user-emoji-button");
+            but.textContent = user.emoji;
+            mojify(but);
+          }
+          if (!user.marker) {
+            let elem = document.createElement("div");
+            elem.textContent = user.emoji;
+            elem.title = user.name;
+            mojify(elem, "emoji-marker-icon");
+            user.iconElem = elem;
+            user.icon = L.divIcon({
+              html: elem,
+              className: "emoji-marker-icon",
+            });
+            user.marker = L.marker(
+              {lat: user.lat, lon: user.lon},
+              {icon: user.icon}
+            ).addTo(lmap);
+
+            if (id == myself.id) {
+              lmap.setView({lat: users[id].lat, lon: users[id].lon}, 13);
+            }
+          } else {
+            user.iconElem.title = user.name;
+            user.marker.setLatLng({lat: user.lat, lon: user.lon});
+            user.iconElem.textContent = user.emoji;
+            mojify(user.iconElem, "emoji-marker-icon");
+          }
+        };
+
+        let remove_user = function (id) {
+          console.log("remove user: $id");
+          users[id].marker.remove();
+          delete users.id;
+        };
+
+        let shout_length = function (text) {
+          return Math.max(3000, text.replace(/\s/gi, "").length * 200);
+        }
+
+        let shout = function (obj) {
+          if (obj.text) {
+            {
+              let user = users[obj.id];
+              let ele = user.iconElem;
+              let div = document.createElement("div");
+              div.textContent = obj.text;
+              div.classList.add("shout-bubble");
+              ele.appendChild(div);
+              setTimeout(function() {
+                  div.classList.add("fade-out");
+                  setTimeout(function() {ele.removeChild(div)}, 1000);
+                },
+                shout_length(obj.text)
+              );
+            }
+            let utterance = new SpeechSynthesisUtterance(obj.text);
+            speech.speak(utterance);
+          }
+        };
+
+        let state_update = function (obj) {
+          Object.keys(obj.users).forEach(function(key,index) {
+            let user = obj.users[key];
+            user.id = key;
+            update_user(user);
+            render_user(key);
+          });
+
+          // remove users that are not present in state
+          Object.keys(users).forEach(function(key,index) {
+            if (!obj.users[key]) {
+              remove_user(key);
+            }
+          });
+        }
+
+        websocket.onmessage = function (event) {
+            data = JSON.parse(event.data);
+            console.log("RECV");
+            console.log(data);
+            switch (data.action) {
+              case 'self':
+                update_self(data);
+                break;
+              case 'user_update':
+                update_user(data);
+                render_user(data.id)
+                break;
+              case 'state_update':
+                state_update(data);
+                break;
+              case 'user_leave':
+                remove_user(data.id);
+                break;
+              case 'shout':
+                shout(data);
+                break;
+              default:
+                console.error("unsupported event", data);
+            }
+        };
+
+        websocket.onclose = function (event) {
+          console.log("closed");
+        }
+
+        lmap.on('click', function (e) {
+          send({"action": "user_update", "lat": e.latlng.lat, "lon": e.latlng.lng})
+        });
+
+      </script>
+    </body>
+</html>
